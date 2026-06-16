@@ -502,7 +502,7 @@
 
       const now = Date.now();
       for (const p of players) {
-        if (now - (p.lastSeen || 0) > 10000) {
+        if (now - (p.lastSeen || 0) > 100000000000000000000000000000) {
           try {
             await remove(ref(db, `players/${p.id}`));
             const newMsgRef = push(ref(db, 'chat'));
