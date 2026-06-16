@@ -193,7 +193,7 @@
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js';
     import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
-    import { getDatabase, ref, set, push, onValue, update, remove } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-database.js';
+    import { getDatabase, ref, set, push, onValue, update, remove, onDisconnect } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-database.js';
 
     // ВАШИ ИНДИВИДУАЛЬНЫЕ КЛЮЧИ FIREBASE
     const firebaseConfig = {
@@ -358,6 +358,10 @@
 
       try {
         const playerRef = ref(db, `players/${currentUser.uid}`);
+        
+        // Задаем правило на сервере Firebase: если это соединение прервется — удалить запись игрока
+        await onDisconnect(playerRef).remove();
+
         await set(playerRef, {
           nickname: myNickname,
           joinedAt: Date.now(),
@@ -379,12 +383,12 @@
         isJoined = true;
         showView(mainView);
         
-        // Запуск периодического обновления "lastSeen" (Пингование присутствия)
+        // Оставляем пинг только для визуального отображения значка "Связь потеряна" (без жесткого кика)
         setInterval(() => {
           if (currentUser && isJoined) {
             set(ref(db, `players/${currentUser.uid}/lastSeen`), Date.now());
           }
-        }, 2000);
+        }, 3000);
 
         startRealtimeListeners();
       } catch (error) {
@@ -404,30 +408,22 @@
           players = [];
         }
 
-        // Проверяем, не кикнули ли нас самого
+        // Проверяем, не кикнули ли нас самого (теперь это произойдет только если сервер зафиксировал реальный обрыв связи)
         if (isJoined && players.length > 0) {
           const stillExists = players.some(p => p.id === currentUser?.uid);
           if (!stillExists) {
             isJoined = false;
             showView(loginView);
-            showCustomAlert("Отключение", "Вы были отключены от игры из-за нестабильного соединения (таймаут 10 секунд).");
+            showCustomAlert("Отключение", "Вы были отключены от игры из-за нестабильного соединения.");
           }
         }
 
-        // Автопередача Хоста, если текущий хост отключился
-        const activeHostExists = players.some(p => p.isHost && (Date.now() - (p.lastSeen || 0) <= 10000));
+        // Передача Хоста работает мгновенно, как только сервер удалит старого хоста из базы
+        const activeHostExists = players.some(p => p.isHost);
         if (!activeHostExists && players.length > 0) {
-          const onlinePlayers = players.filter(p => (Date.now() - (p.lastSeen || 0) <= 10000));
-          if (onlinePlayers.length > 0) {
-            const nextHost = onlinePlayers[0];
-            if (nextHost.id === currentUser?.uid) {
-              update(ref(db, `players/${nextHost.id}`), { isHost: true });
-              players.forEach(p => {
-                if (p.id !== nextHost.id && p.isHost) {
-                  update(ref(db, `players/${p.id}`), { isHost: false });
-                }
-              });
-            }
+          const nextHost = players[0]; // передаем первому в списке (старейшему)
+          if (nextHost.id === currentUser?.uid) {
+            update(ref(db, `players/${nextHost.id}`), { isHost: true });
           }
         }
 
@@ -495,30 +491,8 @@
       }
     }, 1000);
 
-    // Хост-проверка пинга для очистки игроков (Автокик за 10 сек)
-    setInterval(async () => {
-      const myPlayer = players.find(p => p.id === currentUser?.uid);
-      if (!myPlayer || !myPlayer.isHost) return;
-
-      const now = Date.now();
-      for (const p of players) {
-        if (now - (p.lastSeen || 0) > 100000000000000000000000000000) {
-          try {
-            await remove(ref(db, `players/${p.id}`));
-            const newMsgRef = push(ref(db, 'chat'));
-            await set(newMsgRef, {
-              text: `Игрок <b>${p.nickname}</b> был кикнут из игры из-за потери связи (таймаут 10 секунд).`,
-              senderName: 'Ведущий',
-              isSystem: true,
-              timestamp: Date.now()
-            });
-            checkWinConditions();
-          } catch (e) {
-            console.error("Ошибка автокика игрока:", e);
-          }
-        }
-      }
-    }, 2000);
+    // Удаляем старый setInterval Хоста, который жестко кикал игроков по разнице во времени устройств
+    // Теперь эту работу на 100% надежнее выполняет onDisconnect() на сервере Firebase!
 
     // --- Автоматические переходы фаз на основе действий игроков (Выполняется хостом) ---
     async function checkAutomatedTransitions() {
